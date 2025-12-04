@@ -12,6 +12,8 @@ class TradeLogger(bt.Analyzer):
     """
     def __init__(self):
         self.trades = []
+        # 记录已写入的 OrderGroup ID，避免重复
+        self.logged_order_groups = set()
 
     def notify_trade(self, trade):
         if not trade.isclosed:
@@ -19,6 +21,11 @@ class TradeLogger(bt.Analyzer):
 
         # 从 trade 对象直接获取信息
         data = trade.data
+
+        # 如果对应的 OrderGroup 已经通过 notify_order 记录过，则跳过，避免重复
+        og_dup = self._find_matching_order_group(trade)
+        if og_dup and og_dup.id in self.logged_order_groups:
+            return
         
         # ✅ 优先从 OrderGroup 获取精确的成交价格
         # 这避免了 Backtrader 合并多个订单导致的平均价问题
@@ -312,6 +319,98 @@ class TradeLogger(bt.Analyzer):
             'factor_max_drawdown_before_abcd': factor_max_drawdown_before_abcd,
             **context_metrics
         })
+
+        # 标记已记录的 OrderGroup，避免 notify_order 再次写入
+        if og_dup:
+            self.logged_order_groups.add(og_dup.id)
+
+    def notify_order(self, order):
+        """
+        捕获 OrderGroup 层面的平仓，以便记录每个 bracket 的交易明细。
+        Backtrader 的 trade 是净头寸级别，可能不会为同向加仓单触发关闭事件，这里补充记录。
+        """
+        strategy = getattr(self, 'strategy', None)
+        if not strategy:
+            return
+        order_groups = getattr(strategy, 'order_groups', None)
+        if not order_groups:
+            return
+
+        # 匹配 order 属于哪个 OrderGroup
+        og = None
+        for g in order_groups:
+            if order in [g.main_order, g.stop_order, g.limit_order]:
+                og = g
+                break
+        if not og:
+            return
+
+        # 只有止损/止盈完成且未记录过时写入
+        if order.status != order.Completed:
+            return
+        if og.id in self.logged_order_groups:
+            return
+        if order not in [og.stop_order, og.limit_order]:
+            return  # 只在平仓时记录
+        if not og.entry_time or og.exit_time is None or og.entry_price is None or og.exit_price is None:
+            return
+
+        # 计算基础字段
+        entry_dt = og.entry_time
+        exit_dt = og.exit_time
+        is_long = og.is_long
+        size = 1.0
+        mult = 50  # 默认 ES 合约乘数
+        pnl = (og.exit_price - og.entry_price) * size * mult if is_long else (og.entry_price - og.exit_price) * size * mult
+        pnlcomm = pnl - 2.0  # 与策略保持一致：$1 开仓 + $1 平仓
+
+        # 会话因子
+        try:
+            factor_entry_session = self._get_session_type(entry_dt)
+            factor_exit_session = self._get_session_type(exit_dt)
+        except Exception:
+            factor_entry_session = None
+            factor_exit_session = None
+
+        record = {
+            'entry_time': entry_dt,
+            'exit_time': exit_dt,
+            'symbol': getattr(strategy.datas[0], '_name', ''),
+            'direction': 'LONG' if is_long else 'SHORT',
+            'size': size,
+            'entry_price': og.entry_price,
+            'exit_price': og.exit_price,
+            'pnl': pnl,
+            'pnl_net': pnlcomm,
+            'funding_fee': 0.0,
+            'bars_held': None,
+            'factor_entry_session': factor_entry_session,
+            'factor_exit_session': factor_exit_session,
+            # 下方因子无法精确重建，填 None 以保持 schema 对齐
+            'factor_mom1': None,
+            'factor_mom2': None,
+            'factor_market_direction': None,
+            'factor_trend_alignment': None,
+            'factor_is_choppy': None,
+            'factor_reached_abcd': None,
+            'factor_max_drawdown_before_abcd': None,
+            'factor_shadow_gap': None,
+            'factor_has_shadow_gap': None,
+            'factor_shadow_gap_ratio': None,
+            'factor_body_gap': None,
+            'factor_has_body_gap': None,
+            'factor_body_gap_ratio': None,
+            'factor_crossed_k3_extreme': None,
+            'factor_overlap_5': None,
+            'factor_overlap_10': None,
+            'factor_overlap_15': None,
+            'factor_overlap_20': None,
+            'factor_overlap_25': None,
+            'factor_overlap_30': None,
+        }
+
+        self.trades.append(record)
+        self.logged_order_groups.add(og.id)
 
 
     def get_analysis(self):
