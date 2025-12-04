@@ -1,0 +1,51 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.python-version
+
+# Packaging and build
+build/
+dist/
+.eggs/
+*.egg-info/
+pip-wheel-metadata/
+
+# Testing / coverage
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.pytest_cache/
+.mypy_cache/
+.hypothesis/
+.cache/
+
+# IDE / editor settings
+.vscode/
+.idea/
+*.code-workspace
+
+# Environment / secrets
+.env
+.env.*
+
+# Data and run artifacts
+output/
+*_BACKTEST_REPORT.md
+data/**/*.parquet
+data/**/*.csv
+data/**/*.feather
+data/**/*.duckdb
+
+# OS noise
+.DS_Store

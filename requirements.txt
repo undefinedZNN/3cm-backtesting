@@ -1,0 +1,5 @@
+backtrader
+duckdb
+pandas
+pyarrow
+matplotlib
