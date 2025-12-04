@@ -20,82 +20,80 @@ class TradeLogger(bt.Analyzer):
         # 从 trade 对象直接获取信息
         data = trade.data
         
-        # 开仓和平仓信息
-        entry_price = trade.price  # 平均开仓价
-        exit_price_calc = 0.0
+        # ✅ 优先从 OrderGroup 获取精确的成交价格
+        # 这避免了 Backtrader 合并多个订单导致的平均价问题
+        og = self._find_matching_order_group(trade)  # 直接查找，不依赖 signal_context
         
-        # trade.size 在某些情况下可能为 0（因为已经平仓）
-        # 我们需要通过其他方式判断方向
-        # 对于 bracket orders，我们可以通过止损/止盈价格关系判断
-        
-        # 从 baropen 和 barclose 的价格变化判断方向
-        try:
-            open_bar_price = data.close.array[trade.baropen]
-            close_bar_price = data.close.array[trade.barclose]
-        except:
-            open_bar_price = entry_price
-            close_bar_price = entry_price
-        
-        
-        # 获取 PnL（后续需要用于反推平仓价格）
-        pnl = trade.pnl
-        price_change = close_bar_price - open_bar_price
-        
-        # 判断交易方向
-        # Backtrader 的 trade 对象有一个 'long' 属性用于记录原始开仓方向
-        # 即使在平仓后，这个属性仍然保留原始方向信息
-        is_long = True  # 默认值
-        
-        if hasattr(trade, 'long'):
-            # trade.long 是一个列表，包含所有做多的事件
-            # 如果 len(trade.long) > 0，说明是做多交易
-            # 否则是做空交易
-            try:
-                is_long = len(trade.long) > 0
-            except:
-                # 如果 trade.long 不是列表而是布尔值
-                is_long = bool(trade.long)
-        else:
-            # 备用方案：使用 PnL 和价格变化推断
-            if pnl != 0 and price_change != 0:
-                is_long = (pnl * price_change) > 0
-        
-        direction = 'LONG' if is_long else 'SHORT'
-        size = 1.0  # 固定为 1 手
-        
-        # 使用 trade.dtopen/dtclose 获取成交时间，避免 baropen 偏移导致的 1 根（5 分钟）延迟
-        # dtopen/dtclose 是实际成交时刻；若不可用再回退到 bar 索引
-        try:
-            entry_dt = bt.num2date(trade.dtopen)
-        except Exception:
-            try:
-                entry_dt = bt.num2date(data.datetime.array[trade.baropen - 1])
-            except Exception:
-                entry_dt = bt.num2date(data.datetime[0])
-
-        try:
-            exit_dt = bt.num2date(trade.dtclose)
-        except Exception:
-            try:
-                exit_dt = bt.num2date(data.datetime.array[trade.barclose])
-            except Exception:
-                exit_dt = entry_dt
-        
-        # 平仓价格 - 通过 PnL 反推
-        entry_value = entry_price * size * 50  # 合约价值 = 价格 * 手数 * 合约乘数
-        
-        if size != 0:
-            # pnl = (exit_price - entry_price) * size * multiplier (做多)
-            # pnl = (entry_price - exit_price) * size * multiplier (做空)
+        if og and og.entry_price is not None:
+            # ✅ 使用 OrderGroup 的精确成交价
+            entry_price = og.entry_price
+            exit_price_calc = og.exit_price if og.exit_price is not None else 0.0
+            entry_dt = og.entry_time if og.entry_time else bt.num2date(trade.dtopen)
+            exit_dt = og.exit_time if og.exit_time else bt.num2date(trade.dtclose)
+            is_long = og.is_long
+            direction = og.direction
+            
+            # 使用 OrderGroup 的精确价格重新计算 PnL
+            size = 1.0
             if is_long:
-                exit_price_calc = entry_price + (pnl / (size * 50))
+                pnl = (exit_price_calc - entry_price) * size * 50
             else:
-                exit_price_calc = entry_price - (pnl / (size * 50))
+                pnl = (entry_price - exit_price_calc) * size * 50
+            pnlcomm = pnl - 2.0  # 扣除手续费 ($1开仓 + $1平仓)
+            
         else:
-            exit_price_calc = entry_price
+            # ⚠️ 回退：使用 trade 对象（可能是平均价）
+            entry_price = trade.price  # 平均开仓价（如果多笔订单会不准确）
+            pnl = trade.pnl
+            pnlcomm = trade.pnlcomm
+            size = 1.0
+            
+            # 判断交易方向
+            is_long = True
+            if hasattr(trade, 'long'):
+                try:
+                    is_long = len(trade.long) > 0
+                except:
+                    is_long = bool(trade.long)
+            else:
+                try:
+                    open_bar_price = data.close.array[trade.baropen]
+                    close_bar_price = data.close.array[trade.barclose]
+                    price_change = close_bar_price - open_bar_price
+                    if pnl != 0 and price_change != 0:
+                        is_long = (pnl * price_change) > 0
+                except:
+                    pass
+            
+            direction = 'LONG' if is_long else 'SHORT'
+            
+            # 获取时间
+            try:
+                entry_dt = bt.num2date(trade.dtopen)
+            except Exception:
+                try:
+                    entry_dt = bt.num2date(data.datetime.array[trade.baropen - 1])
+                except Exception:
+                    entry_dt = bt.num2date(data.datetime[0])
+
+            try:
+                exit_dt = bt.num2date(trade.dtclose)
+            except Exception:
+                try:
+                    exit_dt = bt.num2date(data.datetime.array[trade.barclose])
+                except Exception:
+                    exit_dt = entry_dt
+            
+            # 平仓价格 - 通过 PnL 反推
+            if size != 0:
+                if is_long:
+                    exit_price_calc = entry_price + (pnl / (size * 50))
+                else:
+                    exit_price_calc = entry_price - (pnl / (size * 50))
+            else:
+                exit_price_calc = entry_price
         
-        # 盈亏
-        pnlcomm = trade.pnlcomm  # 扣除佣金后的盈亏
+        # 盈亏（统一使用已计算的值）
         
         # 资金费率
         funding_fee = 0.0
@@ -126,26 +124,49 @@ class TradeLogger(bt.Analyzer):
             else:
                 factor_trend_alignment = 'neutral'
 
-        # --- 计算背景信息 ---
-        # 使用 _find_signal_bars 找到正确的 K1, K2, K3
-        # 如果是亏损单，尝试使用 exit_price 作为止损价来辅助定位 K1
-        # 注意：这假设亏损是因为触及止损，对于手动平仓或反向信号平仓可能不适用，但作为启发式方法很有用
-        stop_loss_price_hint = None
-        if pnl < 0:
-            # 如果是亏损，exit_price 很可能就是止损价
-            # 但要注意滑点，所以 _find_signal_bars 中允许微小误差
-            stop_loss_price_hint = exit_price_calc
+        # --- 从策略的 OrderGroup 获取精确的信号背景 ---
+        signal_context = self._get_signal_context_from_strategy(trade)
+        
+        # 初始化 K1/K2/K3 价格点
+        k1_low = k1_high = k2_low = k2_high = k3_close = k3_low = k3_high = 0.0
+        
+        if signal_context:
+            # 使用 OrderGroup 中记录的原始信号数据（最精确）
+            idx_k3 = signal_context.get('signal_bar')
+            idx_k2 = idx_k3 - 1 if idx_k3 is not None else trade.baropen - 1
+            idx_k1 = idx_k3 - 2 if idx_k3 is not None else trade.baropen - 2
             
-        # 确定 K1, K2, K3 的索引
-        idx_k1, idx_k2, idx_k3 = self._find_signal_bars(data, trade.baropen, is_long, stop_loss_price_hint)
+            # 直接从 signal_context 获取 K1/K2/K3 数据
+            k1_low = signal_context.get('k1_low', 0.0)
+            k1_high = signal_context.get('k1_high', 0.0)
+            k2_low = signal_context.get('k2_low', 0.0)
+            k2_high = signal_context.get('k2_high', 0.0)
+            k3_close = signal_context.get('k3_close', 0.0)
+            k3_low = signal_context.get('k3_low', 0.0)
+            k3_high = signal_context.get('k3_high', 0.0)
+        else:
+            # 回退到现有的启发式方法
+            stop_loss_price_hint = None
+            if pnl < 0:
+                stop_loss_price_hint = exit_price_calc
+            
+            idx_k1, idx_k2, idx_k3 = self._find_signal_bars(data, trade.baropen, is_long, stop_loss_price_hint)
+            
+            # 从数据中提取
+            try:
+                k1_low = data.low.array[idx_k1]
+                k1_high = data.high.array[idx_k1]
+                k2_low = data.low.array[idx_k2]
+                k2_high = data.high.array[idx_k2]
+                k3_close = data.close.array[idx_k3]
+                k3_low = data.low.array[idx_k3]
+                k3_high = data.high.array[idx_k3]
+            except (IndexError, TypeError): # Handle cases where idx_k1/k2/k3 might be -1 or None
+                k1_low = k1_high = k2_low = k2_high = k3_close = k3_low = k3_high = 0.0
         
         # --- 计算 K3 时刻的动量指标 ---
         # 使用 K3 收盘时刻计算 DEMA 动量
         factor_dema, factor_mom1, factor_mom2 = self._calculate_momentum(data, idx_k3, lookback=6)
-
-
-
-        
         context_metrics = {}
         if idx_k1 >= 0:
             def get_bar(idx):
@@ -311,6 +332,72 @@ class TradeLogger(bt.Analyzer):
         conn.execute(f"CREATE TABLE trades AS SELECT * FROM df")
         conn.execute(f"COPY trades TO '{filepath}' (FORMAT PARQUET)")
         conn.close()
+
+    def _get_signal_context_from_strategy(self, trade):
+        """
+        从策略的 OrderGroup 中获取信号上下文
+        
+        Args:
+            trade: backtrader trade object
+        
+        Returns:
+            signal_context dict or None
+        """
+        strategy = getattr(self, 'strategy', None)
+        if not strategy:
+            return None
+        
+        order_groups = getattr(strategy, 'order_groups', None)
+        if not order_groups:
+            return None
+        
+        # 尝试通过时间和价格匹配 OrderGroup
+        entry_price = trade.price
+        entry_bar = trade.baropen
+        
+        for og in order_groups:
+            if og.is_closed() and og.entry_price:
+                # 匹配逻辑：价格接近 + bar 接近
+                if abs(og.entry_price - entry_price) < 0.01:
+                    # 进一步验证 bar 范围（允许一定偏差）
+                    signal_bar = og.signal_context.get('signal_bar', -999)
+                    if abs(signal_bar - entry_bar) < 5:
+                        return og.signal_context
+        
+        return None
+
+    def _find_matching_order_group(self, trade):
+        """
+        查找与 trade 对象匹配的 OrderGroup
+        
+        Args:
+            trade: backtrader trade object
+        
+        Returns:
+            OrderGroup object or None
+        """
+        strategy = getattr(self, 'strategy', None)
+        if not strategy:
+            return None
+        
+        order_groups = getattr(strategy, 'order_groups', None)
+        if not order_groups:
+            return None
+        
+        # 通过价格和时间匹配 OrderGroup
+        try:
+            entry_dt = bt.num2date(trade.dtopen)
+        except:
+            return None
+        
+        for og in order_groups:
+            if og.is_closed() and og.entry_price and og.entry_time:
+                # 匹配逻辑：时间精确匹配（秒级）
+                time_diff = abs((og.entry_time - entry_dt).total_seconds())
+                if time_diff < 60:  # 1分钟内的时间差
+                    return og
+        
+        return None
 
     def _get_market_context(self, bar_index):
         """

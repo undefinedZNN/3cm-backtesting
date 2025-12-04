@@ -13,7 +13,7 @@ from analyzers.trade_logger import TradeLogger
 def run_backtest(parquet_path, output_path='output/trade_details.parquet', 
                  initial_cash=100000.0, commission=0.001, size=1.0,
                  resample='5T', contract_multiplier=50, margin=0.007, 
-                 tick_size=0.25, timeframe='timestamp'):
+                 tick_size=0.25, timeframe='timestamp', direction_mode='BOTH'):
     """
     运行回测
     
@@ -40,6 +40,7 @@ def run_backtest(parquet_path, output_path='output/trade_details.parquet',
     print(f"手续费率: {commission*100:.3f}%")
     print(f"交易数量: {size} 手")
     print(f"数据重采样: {resample}")
+    print(f"方向模式: {direction_mode}")
     print(f"{'='*60}\n")
 
     # 创建 Cerebro 引擎
@@ -58,7 +59,7 @@ def run_backtest(parquet_path, output_path='output/trade_details.parquet',
         return None
 
     # 添加策略
-    cerebro.addstrategy(ThreeCandlesStrategy, size=size)
+    cerebro.addstrategy(ThreeCandlesStrategy, size=size, direction_mode=direction_mode)
     print("✓ 策略已添加: 三连阳/阴策略")
 
     # 添加分析器
@@ -68,11 +69,11 @@ def run_backtest(parquet_path, output_path='output/trade_details.parquet',
     # 设置初始资金
     cerebro.broker.setcash(initial_cash)
 
-    # 设置手续费 - 对于期货，使用固定佣金模式
-    # 每手每点的价值 = 合约乘数
-    # 手续费 = 每手固定费用
+    # 设置手续费 - 固定每笔 $1
+    # 对于 Backtrader，使用 commission 参数设置每手固定费用
     cerebro.broker.setcommission(
-        commission=commission,  # 如果是百分比
+        commission=1.0,  # 固定 $1 每手
+        commtype=bt.CommInfoBase.COMM_FIXED,  # 固定佣金模式
         mult=contract_multiplier,  # 合约乘数
         margin=margin  # 保证金比例
     )
@@ -176,8 +177,8 @@ if __name__ == '__main__':
     run_backtest(
         parquet_path=data_file,
         output_path=output_file,
-        initial_cash=100000.0,
-        commission=0.0001,  # 0.01% 手续费
+        initial_cash=10000000.0,  # 初始资金 $10M
+        commission=0.0001,  # 手续费参数（实际使用固定$1，在函数内部设置）
         size=1.0,  # 1手
         resample='5T',  # 5分钟
         contract_multiplier=50,  # ES 合约乘数
