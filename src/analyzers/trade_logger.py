@@ -14,6 +14,8 @@ class TradeLogger(bt.Analyzer):
         self.trades = []
         # 记录已写入的 OrderGroup ID，避免重复
         self.logged_order_groups = set()
+        # 暂存从 notify_order 写入的索引，便于后续用 trade 记录替换
+        self._order_log_index = {}
 
     def notify_trade(self, trade):
         if not trade.isclosed:
@@ -22,10 +24,8 @@ class TradeLogger(bt.Analyzer):
         # 从 trade 对象直接获取信息
         data = trade.data
 
-        # 如果对应的 OrderGroup 已经通过 notify_order 记录过，则跳过，避免重复
+        # 匹配对应的 OrderGroup
         og_dup = self._find_matching_order_group(trade)
-        if og_dup and og_dup.id in self.logged_order_groups:
-            return
         
         # ✅ 优先从 OrderGroup 获取精确的成交价格
         # 这避免了 Backtrader 合并多个订单导致的平均价问题
@@ -308,6 +308,7 @@ class TradeLogger(bt.Analyzer):
             'pnl_net': pnlcomm,
             'funding_fee': funding_fee,
             'bars_held': trade.barlen,
+            'source': 'trade',
             'factor_entry_session': factor_entry_session,
             'factor_exit_session': factor_exit_session,
             'factor_mom1': factor_mom1,
@@ -319,6 +320,14 @@ class TradeLogger(bt.Analyzer):
             'factor_max_drawdown_before_abcd': factor_max_drawdown_before_abcd,
             **context_metrics
         })
+
+        # 如果之前有同一 OG 的 order 记录，移除，以 trade 记录为准
+        if og_dup and og_dup.id in self._order_log_index:
+            idx = self._order_log_index.pop(og_dup.id)
+            try:
+                self.trades.pop(idx)
+            except Exception:
+                pass
 
         # 标记已记录的 OrderGroup，避免 notify_order 再次写入
         if og_dup:
@@ -384,6 +393,7 @@ class TradeLogger(bt.Analyzer):
             'pnl_net': pnlcomm,
             'funding_fee': 0.0,
             'bars_held': None,
+            'source': 'order',
             'factor_entry_session': factor_entry_session,
             'factor_exit_session': factor_exit_session,
             # 下方因子无法精确重建，填 None 以保持 schema 对齐
@@ -410,6 +420,8 @@ class TradeLogger(bt.Analyzer):
         }
 
         self.trades.append(record)
+        # 记录索引，若后续收到 notify_trade 用 trade 记录替换
+        self._order_log_index[og.id] = len(self.trades) - 1
         self.logged_order_groups.add(og.id)
 
 

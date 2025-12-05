@@ -220,7 +220,8 @@ class ThreeCandlesStrategy(bt.Strategy):
                 'k3_close': k3_close,
                 'k3_low': k3_low,
                 'k3_high': k3_high,
-                'signal_bar': len(self),
+                # len(self) 是累计 bar 数量，当前 bar 的索引应为 len(self)-1
+                'signal_bar': len(self) - 1,
                 'stop_price': stop_loss_price,
                 'limit_price': take_profit_price,
             }
@@ -272,7 +273,7 @@ class ThreeCandlesStrategy(bt.Strategy):
                 'k3_close': k3_close,
                 'k3_low': k3_low,
                 'k3_high': k3_high,
-                'signal_bar': len(self),
+                'signal_bar': len(self) - 1,
                 'stop_price': stop_loss_price,
                 'limit_price': take_profit_price,
             }

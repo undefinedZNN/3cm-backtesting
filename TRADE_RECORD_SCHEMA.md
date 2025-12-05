@@ -19,8 +19,8 @@
 | `bars_held` | int | 持仓的 K 线数量 |
 | `factor_entry_session` | string | 入场所在交易时段：`RTH` / `ETH` |
 | `factor_exit_session` | string | 出场所在交易时段：`RTH` / `ETH` |
-| `factor_mom1` | float | K3 时刻 DEMA 一阶动量 |
-| `factor_mom2` | float | K3 时刻 DEMA 二阶动量 |
+| `factor_mom1` | float | K3 时刻 DEMA 一阶动量 速度|
+| `factor_mom2` | float | K3 时刻 DEMA 二阶动量 加速度 |
 | `factor_market_direction` | string | DMI 判断的市场方向：`BULL` / `BEAR` / `NEUTRAL` |
 | `factor_trend_alignment` | string | 交易方向与市场方向是否一致：`aligned` / `opposite` / `neutral`（仅记录，不影响交易逻辑） |
 | `factor_is_choppy` | bool | 是否震荡：根据 ADX 是否低于阈值（默认 25） |
