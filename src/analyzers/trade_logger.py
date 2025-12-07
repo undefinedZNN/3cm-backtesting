@@ -136,6 +136,11 @@ class TradeLogger(bt.Analyzer):
         
         # 初始化 K1/K2/K3 价格点
         k1_low = k1_high = k2_low = k2_high = k3_close = k3_low = k3_high = 0.0
+        if signal_context:
+            if signal_context.get('factor_mom1') is not None:
+                factor_mom1 = signal_context.get('factor_mom1')
+            if signal_context.get('factor_mom2') is not None:
+                factor_mom2 = signal_context.get('factor_mom2')
         
         if signal_context:
             # 使用 OrderGroup 中记录的原始信号数据（最精确）
@@ -381,6 +386,8 @@ class TradeLogger(bt.Analyzer):
             factor_entry_session = None
             factor_exit_session = None
 
+        sc = og.signal_context or {}
+
         record = {
             'entry_time': entry_dt,
             'exit_time': exit_dt,
@@ -396,20 +403,20 @@ class TradeLogger(bt.Analyzer):
             'source': 'order',
             'factor_entry_session': factor_entry_session,
             'factor_exit_session': factor_exit_session,
-            # 下方因子无法精确重建，填 None 以保持 schema 对齐
-            'factor_mom1': None,
-            'factor_mom2': None,
-            'factor_market_direction': None,
-            'factor_trend_alignment': None,
-            'factor_is_choppy': None,
+            # 下方因子优先使用信号上下文，无法重建的保持 None
+            'factor_mom1': sc.get('factor_mom1'),
+            'factor_mom2': sc.get('factor_mom2'),
+            'factor_market_direction': sc.get('factor_market_direction'),
+            'factor_trend_alignment': sc.get('factor_trend_alignment'),
+            'factor_is_choppy': sc.get('factor_is_choppy'),
             'factor_reached_abcd': None,
             'factor_max_drawdown_before_abcd': None,
-            'factor_shadow_gap': None,
-            'factor_has_shadow_gap': None,
-            'factor_shadow_gap_ratio': None,
-            'factor_body_gap': None,
-            'factor_has_body_gap': None,
-            'factor_body_gap_ratio': None,
+            'factor_shadow_gap': sc.get('factor_shadow_gap'),
+            'factor_has_shadow_gap': sc.get('factor_has_shadow_gap'),
+            'factor_shadow_gap_ratio': sc.get('factor_shadow_gap_ratio'),
+            'factor_body_gap': sc.get('factor_body_gap'),
+            'factor_has_body_gap': sc.get('factor_has_body_gap'),
+            'factor_body_gap_ratio': sc.get('factor_body_gap_ratio'),
             'factor_crossed_k3_extreme': None,
             'factor_overlap_5': None,
             'factor_overlap_10': None,

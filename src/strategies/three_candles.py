@@ -1,6 +1,7 @@
 import backtrader as bt
 import math
 import pytz
+import pandas as pd
 from datetime import datetime
 
 class ThreeCandlesStrategy(bt.Strategy):
@@ -36,8 +37,8 @@ class ThreeCandlesStrategy(bt.Strategy):
 
         # 顺势抑制状态（多/空各自独立）
         self.trend_state = {
-            'LONG': {'locked': False, 'last_session': None},
-            'SHORT': {'locked': False, 'last_session': None},
+            'LONG': {'locked': False, 'last_session': None, 'last_reset_bar_idx': None},
+            'SHORT': {'locked': False, 'last_session': None, 'last_reset_bar_idx': None},
         }
 
         # 调试窗口（可选）
@@ -138,11 +139,16 @@ class ThreeCandlesStrategy(bt.Strategy):
         curr_session = self._get_session_type(self.datas[0].datetime.datetime())
         is_flat = curr_close == curr_open
 
+        # 当前 bar 序号（从 0 开始）
+        curr_bar_idx = len(self) - 1
+
         # --- 重置判定：平盘、回调、时段切换 ---
         self._update_trend_state('LONG', curr_session, is_flat,
-                                 price_reset=(curr_low <= prev_low) or (curr_high <= prev_high))
+                                 price_reset=(curr_low <= prev_low) or (curr_high <= prev_high),
+                                 curr_bar_idx=curr_bar_idx)
         self._update_trend_state('SHORT', curr_session, is_flat,
-                                 price_reset=(curr_high >= prev_high) or (curr_low >= prev_low))
+                                 price_reset=(curr_high >= prev_high) or (curr_low >= prev_low),
+                                 curr_bar_idx=curr_bar_idx)
 
         # 调试打印锁定状态（仅在窗口内）
         if self._in_debug_window(self.datas[0].datetime.datetime()):
@@ -169,21 +175,32 @@ class ThreeCandlesStrategy(bt.Strategy):
         k1_high = self.datahigh[-2]
         
         # 判断趋势
-        # 做多：三连阳 且 高低点都抬高
+        # 做多：三连阳 且 低点都抬高
         is_three_bull = (
             (k1_close > k1_open) and (k2_close > k2_open) and (k3_close > k3_open) and
-            (k3_low > k2_low > k1_low) and  # 低点抬高
-            (k3_high > k2_high > k1_high)  # 高点抬高
+            (k3_low > k2_low > k1_low)
         )
         
-        # 做空：三连阴 且 高低点都降低
+        # 做空：三连阴 且 高点都降低
         is_three_bear = (
             (k1_close < k1_open) and (k2_close < k2_open) and (k3_close < k3_open) and
-            (k3_high < k2_high < k1_high) and  # 高点降低
-            (k3_low < k2_low < k1_low)   # 低点降低
+            (k3_high < k2_high < k1_high)
         )
         
-        if is_three_bull and allow_long and not self.trend_state['LONG']['locked']:
+        signal_bar_idx = curr_bar_idx  # 当前 bar 的索引
+        factor_dema, factor_mom1, factor_mom2 = self._calculate_momentum(signal_bar_idx, lookback=6)
+        market_ctx = self.market_context.get(len(self)) if isinstance(self.market_context, dict) else None
+        factor_market_direction = None
+        factor_is_choppy = None
+        if market_ctx:
+            factor_market_direction = market_ctx.get('factor_market_direction')
+            factor_is_choppy = market_ctx.get('factor_is_choppy')
+
+        # 如果刚刚重置（解锁）的那根 bar，禁止当根触发，需等下一根
+        long_recent_reset = self.trend_state['LONG'].get('last_reset_bar_idx') == signal_bar_idx
+        short_recent_reset = self.trend_state['SHORT'].get('last_reset_bar_idx') == signal_bar_idx
+
+        if is_three_bull and allow_long and not self.trend_state['LONG']['locked'] and not long_recent_reset:
             # 检查做多订单数量上限
             if active_long_count >= self.params.max_concurrent_long:
                 return  # 做多订单数量达到上限
@@ -211,19 +228,55 @@ class ThreeCandlesStrategy(bt.Strategy):
             )
             
             # 构建信号上下文
+            shadow_gap, has_shadow_gap, shadow_gap_ratio, body_gap, has_body_gap, body_gap_ratio = self._calculate_gaps(
+                is_long=True,
+                k1_open=k1_open,
+                k1_close=k1_close,
+                k1_high=k1_high,
+                k1_low=k1_low,
+                k3_open=k3_open,
+                k3_close=k3_close,
+                k3_high=k3_high,
+                k3_low=k3_low,
+            )
+
+            trend_align = None
+            if factor_market_direction in ('BULL', 'BEAR'):
+                trend_align = 'aligned' if factor_market_direction == 'BULL' else 'opposite'
+            elif factor_market_direction == 'NEUTRAL':
+                trend_align = 'neutral'
+
             signal_context = {
                 'direction': 'LONG',
+                'k1_open': k1_open,
+                'k1_close': k1_close,
                 'k1_low': k1_low,
                 'k1_high': k1_high,
+                'k2_open': k2_open,
+                'k2_close': k2_close,
                 'k2_low': k2_low,
                 'k2_high': k2_high,
+                'k3_open': k3_open,
                 'k3_close': k3_close,
                 'k3_low': k3_low,
                 'k3_high': k3_high,
                 # len(self) 是累计 bar 数量，当前 bar 的索引应为 len(self)-1
-                'signal_bar': len(self) - 1,
+                'signal_bar': signal_bar_idx,
                 'stop_price': stop_loss_price,
                 'limit_price': take_profit_price,
+                'factor_dema': factor_dema,
+                'factor_mom1': factor_mom1,
+                'factor_mom2': factor_mom2,
+                'factor_entry_session': curr_session,
+                'factor_market_direction': factor_market_direction,
+                'factor_trend_alignment': trend_align,
+                'factor_is_choppy': factor_is_choppy,
+                'factor_shadow_gap': shadow_gap,
+                'factor_has_shadow_gap': has_shadow_gap,
+                'factor_shadow_gap_ratio': shadow_gap_ratio,
+                'factor_body_gap': body_gap,
+                'factor_has_body_gap': has_body_gap,
+                'factor_body_gap_ratio': body_gap_ratio,
             }
             
             # 创建 OrderGroup 并追踪
@@ -236,7 +289,7 @@ class ThreeCandlesStrategy(bt.Strategy):
             self.log(f'[OG-{og.id}] LONG ORDER CREATED, TP: {take_profit_price:.2f}, SL: {stop_loss_price:.2f}')
             if self._in_debug_window(self.datas[0].datetime.datetime()):
                 print(f"[DEBUG-ORDER] {self.datas[0].datetime.datetime()} LONG created ref=OG-{og.id} TP={take_profit_price:.2f} SL={stop_loss_price:.2f}")
-        elif is_three_bear and allow_short and not self.trend_state['SHORT']['locked']:
+        elif is_three_bear and allow_short and not self.trend_state['SHORT']['locked'] and not short_recent_reset:
             # 检查做空订单数量上限
             if active_short_count >= self.params.max_concurrent_short:
                 return  # 做空订单数量达到上限
@@ -264,18 +317,54 @@ class ThreeCandlesStrategy(bt.Strategy):
             )
             
             # 构建信号上下文
+            shadow_gap, has_shadow_gap, shadow_gap_ratio, body_gap, has_body_gap, body_gap_ratio = self._calculate_gaps(
+                is_long=False,
+                k1_open=k1_open,
+                k1_close=k1_close,
+                k1_high=k1_high,
+                k1_low=k1_low,
+                k3_open=k3_open,
+                k3_close=k3_close,
+                k3_high=k3_high,
+                k3_low=k3_low,
+            )
+
+            trend_align = None
+            if factor_market_direction in ('BULL', 'BEAR'):
+                trend_align = 'aligned' if factor_market_direction == 'BEAR' else 'opposite'
+            elif factor_market_direction == 'NEUTRAL':
+                trend_align = 'neutral'
+
             signal_context = {
                 'direction': 'SHORT',
+                'k1_open': k1_open,
+                'k1_close': k1_close,
                 'k1_low': k1_low,
                 'k1_high': k1_high,
+                'k2_open': k2_open,
+                'k2_close': k2_close,
                 'k2_low': k2_low,
                 'k2_high': k2_high,
+                'k3_open': k3_open,
                 'k3_close': k3_close,
                 'k3_low': k3_low,
                 'k3_high': k3_high,
-                'signal_bar': len(self) - 1,
+                'signal_bar': signal_bar_idx,
                 'stop_price': stop_loss_price,
                 'limit_price': take_profit_price,
+                'factor_dema': factor_dema,
+                'factor_mom1': factor_mom1,
+                'factor_mom2': factor_mom2,
+                'factor_entry_session': curr_session,
+                'factor_market_direction': factor_market_direction,
+                'factor_trend_alignment': trend_align,
+                'factor_is_choppy': factor_is_choppy,
+                'factor_shadow_gap': shadow_gap,
+                'factor_has_shadow_gap': has_shadow_gap,
+                'factor_shadow_gap_ratio': shadow_gap_ratio,
+                'factor_body_gap': body_gap,
+                'factor_has_body_gap': has_body_gap,
+                'factor_body_gap_ratio': body_gap_ratio,
             }
             
             # 创建 OrderGroup 并追踪
@@ -325,13 +414,85 @@ class ThreeCandlesStrategy(bt.Strategy):
             'factor_is_choppy': is_choppy
         }
 
-    def _update_trend_state(self, direction, curr_session, is_flat, price_reset):
+    def _calculate_momentum(self, idx, lookback=6):
+        """计算 DEMA/mom1/mom2（与 TradeLogger 保持一致）。"""
+        try:
+            history_length = lookback * 2 + math.ceil(lookback / 2) + 10
+            start_idx = max(0, idx - history_length + 1)
+
+            close_prices = []
+            for i in range(start_idx, idx + 1):
+                try:
+                    close_prices.append(self.dataclose.array[i])
+                except Exception:
+                    break
+
+            if len(close_prices) < lookback * 2:
+                return 0.0, 0.0, 0.0
+
+            df = pd.DataFrame({'close': close_prices})
+            ema1 = df['close'].ewm(span=lookback, adjust=False).mean()
+            dema = ema1.ewm(span=lookback, adjust=False).mean()
+
+            half = round(lookback / 2)
+            mom1 = dema.diff(half)
+            mom2 = mom1.diff(half)
+
+            dema_val = dema.iloc[-1] if len(dema) else 0.0
+            mom1_val = mom1.iloc[-1] if len(mom1) else 0.0
+            mom2_val = mom2.iloc[-1] if len(mom2) else 0.0
+
+            if any(pd.isna(x) for x in (dema_val, mom1_val, mom2_val)):
+                return 0.0, 0.0, 0.0
+
+            return float(dema_val), float(mom1_val), float(mom2_val)
+        except Exception:
+            return 0.0, 0.0, 0.0
+
+    def _calculate_gaps(self, is_long, k1_open, k1_close, k1_high, k1_low, k3_open, k3_close, k3_high, k3_low):
+        """基于 K1/K3 计算影线/实体缺口及比例。"""
+        shadow_gap = 0.0
+        has_shadow_gap = False
+        if is_long:
+            if k3_low > k1_high:
+                shadow_gap = k3_low - k1_high
+                has_shadow_gap = True
+        else:
+            if k3_high < k1_low:
+                shadow_gap = k1_low - k3_high
+                has_shadow_gap = True
+
+        signal_range = abs(k3_close - k1_open)
+        shadow_gap_ratio = shadow_gap / signal_range if signal_range > 0 else 0.0
+
+        body_gap = 0.0
+        has_body_gap = False
+        k1_body_top = max(k1_open, k1_close)
+        k1_body_bottom = min(k1_open, k1_close)
+        k3_body_top = max(k3_open, k3_close)
+        k3_body_bottom = min(k3_open, k3_close)
+
+        if is_long:
+            if k3_body_bottom > k1_body_top:
+                body_gap = k3_body_bottom - k1_body_top
+                has_body_gap = True
+        else:
+            if k3_body_top < k1_body_bottom:
+                body_gap = k1_body_bottom - k3_body_top
+                has_body_gap = True
+
+        body_gap_ratio = body_gap / signal_range if signal_range > 0 else 0.0
+
+        return shadow_gap, has_shadow_gap, shadow_gap_ratio, body_gap, has_body_gap, body_gap_ratio
+
+    def _update_trend_state(self, direction, curr_session, is_flat, price_reset, curr_bar_idx):
         """
         根据当前K线状态更新多/空的抑制状态。
         - direction: 'LONG' or 'SHORT'
         - curr_session: 当前时段 'RTH'/'ETH'
         - is_flat: 是否收盘=开盘
         - price_reset: 是否触发价格回调（根据方向传入）
+        - curr_bar_idx: 当前 bar 序号（用于标记解锁发生在哪根）
         """
         state = self.trend_state.get(direction)
         if state is None:
@@ -341,6 +502,7 @@ class ThreeCandlesStrategy(bt.Strategy):
 
         if is_flat or price_reset or session_changed:
             state['locked'] = False
+            state['last_reset_bar_idx'] = curr_bar_idx
 
         # 记录当前时段用于下一根判定
         state['last_session'] = curr_session
